@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Go GMP 调度模型可视化</title>
+<style>
+  :root{
+    --bg:#0f1220;
+    --panel:#171b2e;
+    --panel2:#1e2338;
+    --accent:#00d4ff;
+    --accent2:#ff7de9;
+    --g-color:#ffd166;
+    --m-color:#06d6a0;
+    --p-color:#4d96ff;
+    --text:#e8eaf6;
+    --muted:#8a90b3;
+    --danger:#ff5d5d;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:"PingFang SC","Microsoft YaHei","Helvetica Neue",Arial,sans-serif;
+    background:radial-gradient(circle at 20% 0%, #1a1f38 0%, var(--bg) 55%);
+    color:var(--text);
+    min-height:100vh;
+    padding:24px 20px 60px;
+  }
+  h1{
+    text-align:center;
+    font-size:26px;
+    margin:6px 0 4px;
+    letter-spacing:1px;
+  }
+  .subtitle{
+    text-align:center;
+    color:var(--muted);
+    font-size:14px;
+    margin-bottom:22px;
+  }
+  .layout{
+    max-width:1180px;
+    margin:0 auto;
+    display:grid;
+    grid-template-columns: 1fr 300px;
+    gap:20px;
+  }
+  .stage-wrap{
+    background:var(--panel);
+    border-radius:16px;
+    padding:18px 18px 10px;
+    border:1px solid #262c48;
+    box-shadow:0 10px 30px rgba(0,0,0,0.35);
+  }
+  .stage{
+    position:relative;
+    height:460px;
+    background:
+      radial-gradient(circle at 50% 100%, rgba(0,212,255,0.05), transparent 60%),
+      var(--panel2);
+    border-radius:12px;
+    overflow:hidden;
+    border:1px solid #2a3050;
+  }
+  .lane-label{
+    position:absolute;
+    font-size:12px;
+    color:var(--muted);
+    letter-spacing:1px;
+  }
+  .global-queue{
+    position:absolute;
+    top:16px; left:16px; right:16px;
+    height:70px;
+    background:rgba(255,255,255,0.03);
+    border:1px dashed #3a4066;
+    border-radius:10px;
+    display:flex;
+    align-items:center;
+    padding:0 12px;
+    gap:8px;
+    overflow:hidden;
+  }
+  .global-queue.pulse{
+    animation:queuePulse 1s ease-in-out;
+  }
+  @keyframes queuePulse{
+    0%{box-shadow:0 0 0 0 rgba(0,212,255,0.5);}
+    50%{box-shadow:0 0 0 6px rgba(0,212,255,0.15);}
+    100%{box-shadow:0 0 0 0 rgba(0,212,255,0);}
+  }
+  .global-queue .lane-label{ top:-18px; left:2px;}
+  .p-columns{
+    position:absolute;
+    top:104px; left:16px; right:16px; bottom:16px;
+    display:flex;
+    gap:14px;
+  }
+  .p-col{
+    flex:1;
+    background:rgba(77,150,255,0.06);
+    border:1px solid rgba(77,150,255,0.35);
+    border-radius:12px;
+    display:flex;
+    flex-direction:column;
+    padding:10px;
+    position:relative;
+    transition:box-shadow .35s, border-color .35s, background .35s;
+  }
+  .p-col.active-steal{
+    box-shadow:0 0 0 2px var(--accent2), 0 0 24px rgba(255,125,233,0.55);
+    border-color:var(--accent2);
+    background:rgba(255,125,233,0.06);
+  }
+  .p-col.starving{
+    border-color:var(--danger);
+    box-shadow:0 0 18px rgba(255,93,93,0.4);
+    animation:starvingShake 1.4s ease-in-out infinite;
+  }
+  @keyframes starvingShake{
+    0%,100%{transform:translateX(0);}
+    50%{transform:translateX(1.5px);}
+  }
+  .p-header{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    font-size:13px;
+    font-weight:600;
+    color:var(--p-color);
+    margin-bottom:8px;
+  }
+  .p-tag{
+    background:var(--p-color);
+    color:#04101f;
+    padding:1px 7px;
+    border-radius:6px;
+    font-size:11px;
+    font-weight:700;
+  }
+  .m-slot{
+    display:flex;
+    align-items:center;
+    gap:6px;
+    font-size:12px;
+    color:var(--m-color);
+    background:rgba(6,214,160,0.08);
+    border:1px solid rgba(6,214,160,0.4);
+    border-radius:8px;
+    padding:4px 8px;
+    margin-bottom:8px;
+    min-height:22px;
+    transition:.35s;
+  }
+  .m-slot.pop{
+    animation:mPop .4s ease;
+  }
+  @keyframes mPop{
+    0%{transform:scale(0.85);opacity:0.4;}
+    60%{transform:scale(1.06);}
+    100%{transform:scale(1);opacity:1;}
+  }
+  .m-slot.empty{
+    color:var(--muted);
+    border-style:dashed;
+    background:transparent;
+  }
+  .m-dot{
+    width:8px;height:8px;border-radius:50%;
+    background:var(--m-color);
+    box-shadow:0 0 8px var(--m-color);
+    animation:mBlink 1.6s ease-in-out infinite;
+  }
+  @keyframes mBlink{
+    0%,100%{opacity:1;}
+    50%{opacity:0.35;}
+  }
+  .runq{
+    flex:1;
+    display:flex;
+    flex-wrap:wrap;
+    align-content:flex-start;
+    gap:6px;
+    padding:6px 4px;
+    border-radius:8px;
+    background:rgba(0,0,0,0.15);
+    min-height:120px;
+    position:relative;
+  }
+  .g-ball{
+    width:26px;height:26px;
+    border-radius:50%;
+    background:linear-gradient(145deg,var(--g-color),#c99b1f);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    font-size:10px;
+    font-weight:700;
+    color:#3a2c02;
+    box-shadow:0 2px 6px rgba(0,0,0,0.4);
+    will-change:transform;
+    transform:translate(0,0) scale(1);
+  }
+  .g-ball.spawn{
+    animation:gSpawn .45s cubic-bezier(.34,1.56,.64,1);
+  }
+  @keyframes gSpawn{
+    0%{transform:scale(0) translateY(-8px);opacity:0;}
+    70%{transform:scale(1.18) translateY(0);opacity:1;}
+    100%{transform:scale(1);}
+  }
+  .g-ball.running{
+    outline:2px solid #fff;
+    animation:gRunPulse 1s ease-in-out infinite;
+  }
+  @keyframes gRunPulse{
+    0%,100%{box-shadow:0 0 8px 1px #fff8; transform:scale(1.1);}
+    50%{box-shadow:0 0 18px 6px #fffb; transform:scale(1.22);}
+  }
+  .g-ball.blocked{
+    background:linear-gradient(145deg,#ff5d5d,#9c1f1f);
+    color:#fff;
+    animation:gBlockedShake 0.6s ease-in-out infinite;
+  }
+  @keyframes gBlockedShake{
+    0%,100%{transform:rotate(0deg) scale(1.1);}
+    25%{transform:rotate(-6deg) scale(1.1);}
+    75%{transform:rotate(6deg) scale(1.1);}
+  }
+  .g-ball.preempt-flash{
+    animation:preemptFlash .5s ease;
+  }
+  @keyframes preemptFlash{
+    0%{box-shadow:0 0 0 0 var(--danger);}
+    50%{box-shadow:0 0 22px 6px var(--danger);}
+    100%{box-shadow:0 2px 6px rgba(0,0,0,0.4);}
+  }
+  .g-flying{
+    position:fixed;
+    z-index:999;
+    pointer-events:none;
+    transition: transform 0.85s cubic-bezier(.22,.68,0,1.15);
+  }
+  .g-flying::after{
+    content:'';
+    position:absolute;
+    top:50%; left:50%;
+    width:26px; height:26px;
+    border-radius:50%;
+    transform:translate(-50%,-50%);
+    background:radial-gradient(circle, rgba(255,209,102,0.5), transparent 70%);
+    z-index:-1;
+    animation:trailPulse .85s ease-out;
+  }
+  @keyframes trailPulse{
+    0%{opacity:0.9; transform:translate(-50%,-50%) scale(0.6);}
+    100%{opacity:0; transform:translate(-50%,-50%) scale(2.6);}
+  }
+  .caption{
+    position:absolute;
+    left:16px; bottom:10px; right:16px;
+    font-size:12.5px;
+    color:var(--accent);
+    background:rgba(0,0,0,0.35);
+    border-radius:8px;
+    padding:8px 10px;
+    line-height:1.5;
+    min-height:38px;
+    transition:opacity .25s;
+  }
+  .controls{
+    background:var(--panel);
+    border-radius:16px;
+    padding:18px;
+    border:1px solid #262c48;
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+    height:fit-content;
+  }
+  .controls h3{
+    margin:0 0 4px;
+    font-size:15px;
+    color:var(--accent);
+  }
+  button{
+    background:var(--panel2);
+    color:var(--text);
+    border:1px solid #333a5c;
+    border-radius:10px;
+    padding:11px 12px;
+    font-size:13.5px;
+    cursor:pointer;
+    text-align:left;
+    transition:.2s;
+    display:flex;
+    align-items:center;
+    gap:8px;
+  }
+  button:hover{
+    border-color:var(--accent);
+    background:#232a4a;
+    transform:translateX(2px);
+  }
+  button:active{
+    transform:scale(0.97) translateX(2px);
+  }
+  button.current{
+    border-color:var(--accent);
+    background:linear-gradient(135deg,#1c4a55,#1e2338);
+    box-shadow:0 0 0 1px var(--accent) inset;
+  }
+  button .num{
+    background:var(--accent);
+    color:#03222b;
+    font-weight:700;
+    border-radius:6px;
+    padding:1px 7px;
+    font-size:11px;
+  }
+  .divider{
+    height:1px;
+    background:#262c48;
+    margin:6px 0;
+  }
+  .legend{
+    font-size:12px;
+    color:var(--muted);
+    display:flex;
+    flex-direction:column;
+    gap:6px;
+  }
+  .legend span.dot{
+    display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;
+  }
+  .reset-btn{
+    background:transparent;
+    border:1px solid var(--danger);
+    color:var(--danger);
+    justify-content:center;
+  }
+  .reset-btn:hover{
+    background:rgba(255,93,93,0.12);
+  }
+  .add-btn{
+    border:1px solid var(--g-color);
+    color:var(--g-color);
+    justify-content:center;
+  }
+  .add-btn:hover{
+    background:rgba(255,209,102,0.12);
+  }
+  .footer-note{
+    text-align:center;
+    color:var(--muted);
+    font-size:12px;
+    margin-top:18px;
+  }
+  @media (max-width: 900px){
+    .layout{grid-template-columns:1fr;}
+  }
+</style>
+</head>
+<body>
+
+<h1>🧵 Go GMP 调度模型 · 交互演示</h1>
+<div class="subtitle">点击右侧按钮, 依次演示 GMP 调度器的核心工作流程 (G = Goroutine, M = 线程, P = 处理器) · 已加入平移飞行动画</div>
+
+<div class="layout">
+  <div class="stage-wrap">
+    <div class="stage" id="stage">
+      <div class="global-queue" id="globalQueue">
+        <div class="lane-label">🌐 全局队列 Global Run Queue (有锁, 兜底用)</div>
+      </div>
+      <div class="p-columns" id="pColumns"></div>
+      <div class="caption" id="caption">👋 欢迎, 点击右侧步骤按钮开始演示 GMP 调度流程</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <h3>▶️ 场景切换</h3>
+    <button data-step="0"><span class="num">0</span>初始状态: G/M/P 就位</button>
+    <button data-step="1"><span class="num">1</span>创建 G, 进入 P 本地队列</button>
+    <button data-step="2"><span class="num">2</span>M 绑定 P, 执行本地队列</button>
+    <button data-step="3"><span class="num">3</span>本地队列空, 去全局队列取</button>
+    <button data-step="4"><span class="num">4</span>工作窃取 Work Stealing</button>
+    <button data-step="5"><span class="num">5</span>系统调用阻塞 → Hand Off</button>
+    <button data-step="6"><span class="num">6</span>抢占式调度 Preemption</button>
+    <div class="divider"></div>
+    <button class="add-btn" id="addG">➕ 手动新增一个 G (随机分配)</button>
+    <button class="reset-btn" id="resetBtn">🔄 重置场景</button>
+    <div class="divider"></div>
+    <div class="legend">
+      <div><span class="dot" style="background:var(--g-color)"></span>G 黄色圆球 = Goroutine (任务)</div>
+      <div><span class="dot" style="background:var(--m-color)"></span>M 绿色标签 = 系统线程 (工人)</div>
+      <div><span class="dot" style="background:var(--p-color)"></span>P 蓝色边框列 = 处理器 (操作台+本地队列)</div>
+      <div><span class="dot" style="background:var(--danger)"></span>红色 = 阻塞/异常状态</div>
+    </div>
+  </div>
+</div>
+
+<div class="footer-note">GOMAXPROCS = 3 (演示固定为 3 个 P) · 每次点击左侧步骤按钮会重建对应场景动画 · G 的跨区域移动使用真实坐标平移动画</div>
+
+<script>
+const P_COUNT = 3;
+const pColumnsEl = document.getElementById('pColumns');
+const captionEl = document.getElementById('caption');
+const globalQueueEl = document.getElementById('globalQueue');
+
+let gCounter = 1;
+
+function makeGBall(label, extraClass=''){
+  const el = document.createElement('div');
+  el.className = 'g-ball spawn ' + extraClass;
+  el.textContent = label;
+  return el;
+}
+
+function buildPColumns(){
+  pColumnsEl.innerHTML = '';
+  for(let i=0;i<P_COUNT;i++){
+    const col = document.createElement('div');
+    col.className = 'p-col';
+    col.id = 'p'+i;
+    col.innerHTML = `
+      <div class="p-header">
+        <span>P${i}</span>
+        <span class="p-tag">${i===0?'GOMAXPROCS':'processor'}</span>
+      </div>
+      <div class="m-slot empty" id="m-slot-${i}">M : 未绑定</div>
+      <div class="runq" id="runq-${i}"></div>
+    `;
+    pColumnsEl.appendChild(col);
+  }
+}
+
+function setCaption(text){
+  captionEl.style.opacity = 0;
+  setTimeout(()=>{
+    captionEl.textContent = text;
+    captionEl.style.opacity = 1;
+  }, 120);
+}
+
+function pulseGlobalQueue(){
+  globalQueueEl.classList.remove('pulse');
+  void globalQueueEl.offsetWidth;
+  globalQueueEl.classList.add('pulse');
+}
+
+function clearGlobalQueue(){
+  globalQueueEl.querySelectorAll('.g-ball').forEach(e=>e.remove());
+}
+
+function bindM(pIndex){
+  const slot = document.getElementById('m-slot-'+pIndex);
+  slot.className = 'm-slot pop';
+  slot.innerHTML = `<span class="m-dot"></span> M${pIndex} 绑定运行中`;
+}
+
+function unbindM(pIndex, text='M : 未绑定'){
+  const slot = document.getElementById('m-slot-'+pIndex);
+  slot.className = 'm-slot empty pop';
+  slot.innerHTML = text;
+}
+
+function addGToRunq(pIndex, label){
+  const runq = document.getElementById('runq-'+pIndex);
+  const ball = makeGBall(label);
+  runq.appendChild(ball);
+  return ball;
+}
+
+function addGToGlobal(label){
+  const ball = makeGBall(label);
+  globalQueueEl.appendChild(ball);
+  pulseGlobalQueue();
+  return ball;
+}
+
+/**
+ * 真实坐标平移动画:
+ * 1. 记录元素当前屏幕位置(fixed 定位克隆)
+ * 2. 移动 DOM 到目标容器(此时瞬间跳到目标布局位置, 不可见)
+ * 3. 用 transform 从起点差值动画到 0,0, 实现丝滑平移
+ */
+function flyGToTarget(ball, targetContainer, onDone){
+  const startRect = ball.getBoundingClientRect();
+
+  targetContainer.appendChild(ball);
+  const endRect = ball.getBoundingClientRect();
+
+  const dx = startRect.left - endRect.left;
+  const dy = startRect.top - endRect.top;
+
+  ball.classList.add('g-flying');
+  ball.style.left = endRect.left + 'px';
+  ball.style.top = endRect.top + 'px';
+  ball.style.width = endRect.width + 'px';
+  ball.style.height = endRect.height + 'px';
+  ball.style.margin = '0';
+  ball.style.transform = `translate(${dx}px, ${dy}px) scale(1.25)`;
+
+  requestAnimationFrame(()=>{
+    requestAnimationFrame(()=>{
+      ball.style.transform = 'translate(0,0) scale(1)';
+    });
+  });
+
+  setTimeout(()=>{
+    ball.classList.remove('g-flying');
+    ball.style.position = '';
+    ball.style.left = '';
+    ball.style.top = '';
+    ball.style.width = '';
+    ball.style.height = '';
+    ball.style.margin = '';
+    ball.style.transform = '';
+    if(onDone) onDone();
+  }, 880);
+}
+
+// ---------- Scenario definitions ----------
+
+function scenario0(){
+  buildPColumns();
+  clearGlobalQueue();
+  for(let i=0;i<P_COUNT;i++){ unbindM(i); }
+  setCaption('🟦 初始状态: 3 个 P (蓝色操作台) 已创建, 目前还没有 M 绑定, 也没有 G 产生. GOMAXPROCS=3 意味着最多同时有 3 个 G 在并行执行.');
+}
+
+function scenario1(){
+  scenario0();
+  setTimeout(()=>{ addGToRunq(0,'G1'); }, 150);
+  setTimeout(()=>{ addGToRunq(0,'G2'); }, 420);
+  setTimeout(()=>{ addGToRunq(1,'G3'); }, 690);
+  setTimeout(()=>{
+    setCaption('🟨 场景1: 主 goroutine 执行 go func(){} 时创建了新的 G. 新 G 优先被塞进当前 P 的本地队列 (无锁操作, 速度快). 这里 G1, G2 进了 P0, G3 进了 P1.');
+  }, 750);
+}
+
+function scenario2(){
+  scenario1();
+  setTimeout(()=>{
+    bindM(0);
+    bindM(1);
+  }, 1100);
+  setTimeout(()=>{
+    const runq0 = document.getElementById('runq-0');
+    const first = runq0.firstElementChild;
+    if(first) first.classList.add('running');
+    setCaption('🟩 场景2: M0 绑定了 P0, M1 绑定了 P1. M 必须先拿到 P 才能执行 G. M0 从 P0 本地队列头部取出 G1 开始执行 (呼吸光效 = 正在运行).');
+  }, 1500);
+}
+
+function scenario3(){
+  buildPColumns();
+  clearGlobalQueue();
+  setTimeout(()=>{
+    addGToGlobal('G7');
+    addGToGlobal('G8');
+    bindM(2);
+    document.getElementById('p2').classList.add('starving');
+    setCaption('🟧 场景3: P2 本地队列空了 (饥饿状态, 红色边框抖动), M2 会先去检查全局队列. 全局队列里有 G7, G8 在排队 (访问需要加锁, 比本地队列慢).');
+  }, 150);
+  setTimeout(()=>{
+    const g7 = globalQueueEl.querySelector('.g-ball');
+    const targetRunq = document.getElementById('runq-2');
+    if(g7){
+      flyGToTarget(g7, targetRunq, ()=>{
+        document.getElementById('p2').classList.remove('starving');
+        setCaption('🟧 场景3(续): M2 从全局队列取到 G7, 平移搬运到 P2 本地队列继续执行. 全局队列是本地队列空了之后的"兜底"机制.');
+      });
+      setCaption('🟧 场景3(续): G7 正在从全局队列飞向 P2 ...');
+    }
+  }, 1400);
+}
+
+function scenario4(){
+  buildPColumns();
+  clearGlobalQueue();
+  setTimeout(()=>{ addGToRunq(0,'G4'); }, 150);
+  setTimeout(()=>{ addGToRunq(0,'G5'); }, 350);
+  setTimeout(()=>{ addGToRunq(0,'G6'); }, 550);
+  setTimeout(()=>{ addGToRunq(0,'G9'); }, 750);
+  setTimeout(()=>{
+    bindM(0); bindM(1); bindM(2);
+    document.getElementById('p1').classList.add('starving');
+    document.getElementById('p2').classList.add('starving');
+    setCaption('🟪 场景4: P0 本地队列堆了 4 个 G, 而 P1, P2 都空了 (饥饿, 红色抖动). M1, M2 发现自己没活干, 准备发起工作窃取 Work Stealing.');
+  }, 1000);
+
+  setTimeout(()=>{
+    const runq0 = document.getElementById('runq-0');
+    const balls = Array.from(runq0.querySelectorAll('.g-ball'));
+    const stolen = balls.slice(-2);
+    document.getElementById('p0').classList.add('active-steal');
+    setCaption('🟪 场景4(续): P1, P2 正在从 P0 本地队列尾部飞速偷走 G6, G9 ...');
+
+    stolen.forEach((ball, idx)=>{
+      const targetRunq = document.getElementById('runq-'+(idx+1));
+      setTimeout(()=>{
+        flyGToTarget(ball, targetRunq, ()=>{
+          if(idx === stolen.length-1){
+            document.getElementById('p1').classList.remove('starving');
+            document.getElementById('p2').classList.remove('starving');
+            document.getElementById('p0').classList.remove('active-steal');
+            setCaption('🟪 场景4(续): 偷取完成! P1, P2 分别从 P0 拿到 G6, G9. 随机选目标, 偷一半, 这样负载会被打散, 避免一个 P 忙死别的闲死.');
+          }
+        });
+      }, idx * 220);
+    });
+  }, 1900);
+}
+
+function scenario5(){
+  buildPColumns();
+  clearGlobalQueue();
+  setTimeout(()=>{ addGToRunq(0,'G1'); }, 150);
+  setTimeout(()=>{ addGToRunq(0,'G2'); }, 350);
+  setTimeout(()=>{
+    bindM(0);
+    const runq0 = document.getElementById('runq-0');
+    const first = runq0.firstElementChild;
+    first.classList.add('running','blocked');
+    first.textContent = 'G1⚠';
+    setCaption('🟥 场景5: M0 正在执行 G1, 但 G1 发起了阻塞式系统调用 (比如慢速文件 IO). M0 被 G1 死死拖住, 眼看整个 P0 队列里剩下的 G2 都要陪着一起卡住.');
+  }, 700);
+  setTimeout(()=>{
+    unbindM(0, 'M0 : 被 G1 拖住 ⚠');
+    document.getElementById('m-slot-0').style.borderColor = 'var(--danger)';
+    document.getElementById('m-slot-0').style.color = 'var(--danger)';
+    setCaption('🟥 场景5(续): 调度器执行 Hand Off, 让 P0 和被阻塞的 M0 强制解绑, 释放出 P0.');
+  }, 1600);
+  setTimeout(()=>{
+    bindM(0);
+    const slot = document.getElementById('m-slot-0');
+    slot.className = 'm-slot pop';
+    slot.innerHTML = '<span class="m-dot"></span> M3(新/空闲) 接管 P0';
+    const runq0 = document.getElementById('runq-0');
+    const g2 = runq0.querySelector('.g-ball:not(.blocked)');
+    if(g2) g2.classList.add('running');
+    setCaption('🟥 场景5(续): 一个新的或空闲的 M3 立即接管 P0, 继续执行队列里的 G2, 完全不受 G1 阻塞的影响. 等 G1 的系统调用返回后, 会尝试抢一个 P 重新入队.');
+  }, 2700);
+}
+
+function scenario6(){
+  buildPColumns();
+  clearGlobalQueue();
+  setTimeout(()=>{ addGToRunq(0,'GX'); }, 150);
+  setTimeout(()=>{ addGToRunq(0,'G2'); }, 350);
+  setTimeout(()=>{
+    bindM(0);
+    const runq0 = document.getElementById('runq-0');
+    const first = runq0.firstElementChild;
+    first.classList.add('running');
+    first.textContent = 'GX♾';
+    setCaption('🟨 场景6: GX 陷入死循环 (for{} 不让出 CPU), 一直占着 M0 不放, 队列里的 G2 长期得不到执行机会.');
+  }, 700);
+  setTimeout(()=>{
+    const runq0 = document.getElementById('runq-0');
+    const gx = runq0.querySelector('.g-ball');
+    gx.classList.add('preempt-flash');
+    setCaption('🟨 场景6(续): Go 1.14+ 的异步抢占机制介入: sysmon 监控线程检测到 GX 运行超过约 10ms, 向 M0 所在线程发送信号, 强行把 GX 的执行权切走!');
+  }, 1600);
+  setTimeout(()=>{
+    const runq0 = document.getElementById('runq-0');
+    const gx = runq0.querySelector('.g-ball');
+    gx.classList.remove('running','preempt-flash');
+    flyGToTarget(gx, runq0, ()=>{
+      const g2 = runq0.querySelector('.g-ball:not(#'+gx.id+')') || runq0.children[1];
+      if(g2) g2.classList.add('running');
+      setCaption('🟨 场景6(续): GX 被抢占放回队列末尾, G2 获得执行权. 这样即便有恶意或不小心写的死循环代码, 也不会永久卡死整个 P.');
+    });
+  }, 2500);
+}
+
+const scenarios = [scenario0, scenario1, scenario2, scenario3, scenario4, scenario5, scenario6];
+
+document.querySelectorAll('button[data-step]').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    document.querySelectorAll('button[data-step]').forEach(b=>b.classList.remove('current'));
+    btn.classList.add('current');
+    const idx = parseInt(btn.dataset.step);
+    scenarios[idx]();
+  });
+});
+
+document.getElementById('resetBtn').addEventListener('click', ()=>{
+  document.querySelectorAll('button[data-step]').forEach(b=>b.classList.remove('current'));
+  scenario0();
+});
+
+document.getElementById('addG').addEventListener('click', ()=>{
+  const idx = Math.floor(Math.random()*P_COUNT);
+  const runqEl = document.getElementById('runq-'+idx);
+  if(runqEl){
+    gCounter++;
+    addGToRunq(idx, 'G'+(gCounter+10));
+    setCaption(`➕ 手动新增了一个 G, runtime 随机分配到了 P${idx} 的本地队列中.`);
+  }
+});
+
+scenario0();
+</script>
+
+</body>
+</html>
